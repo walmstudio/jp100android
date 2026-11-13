@@ -1,0 +1,29 @@
+# SEH __except(1) filters of the VC debugger-notification wrappers (RaiseException 0x406D1388)
+00fc9f21
+00fc9f83
+# CRT x87 math special-case handlers: targets of the _trandisp/_ctrandisp jump tables (reached via jmp [ebx] at 00f11871,
+# never called directly, so the static scan misses them). fmod table @012df830, atan2 table @012e5c20.
+# run 13: MISSING-FUNC 00f15ed8 <- jmp at 00f11871 when entering Episode 1 (adv_junglecliff).
+00f01314
+00f11884
+00f118bd
+00f118bf
+00f118e7
+00f11926
+00f15e5c
+00f15eb5
+00f15ed8
+# one-argument CRT x87 dispatch tables (_trandisp1, jmp [ebx] at 00f117e5; table base in edx, entries at +10h..+1Ch):
+# exp @012e968a, sinh @012ebb3a, cosh @012ebb5a, tanh @012ebb7a (found by scanning every "mov edx, table").
+# run 15: MISSING-FUNC 00f1188d <- jmp at 00f117e5 (exp special case) in Episode 1 gameplay.
+00f1187c
+00f1188d
+00f11892
+00f17081
+00f171b1
+00f1c770
+00f1c789
+00f1c7c2
+00f1c7e4
+00f1c7f1
+00f1c811
