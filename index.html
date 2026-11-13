@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#07151c">
+    <meta name="color-scheme" content="dark">
+    <meta name="description" content="JP100 — экспериментальный порт Jurassic Park: The Game — Episode 1 на Android. Скачайте исходники и следуйте инструкции по сборке и установке.">
+    <link rel="icon" type="image/svg+xml" href="images/favicon.svg">
+    <link rel="preload" href="background.png" as="image">
+    <title>JP100 — Jurassic Park: The Game на Android</title>
+    <link rel="stylesheet" href="style/main.css">
+</head>
+<body>
+    <a class="skip-link" href="#installation">Перейти к инструкции</a>
+
+    <header class="site-header">
+        <div class="container header-inner">
+            <a class="brand" href="#top" aria-label="JP100 — на главную">
+                <span class="brand-mark" aria-hidden="true">JP</span>
+                <span>JP100 <small>Android port</small></span>
+            </a>
+            <nav class="header-nav" aria-label="Основная навигация">
+                <a href="#installation">Установка</a>
+                <a href="https://github.com/walmstudio/jp100android/tree/source-code" target="_blank" rel="noopener noreferrer">GitHub <span aria-hidden="true">↗</span></a>
+            </nav>
+        </div>
+    </header>
+
+    <main id="top">
+        <section class="hero container" aria-labelledby="hero-title">
+            <div class="hero-panel">
+                <div class="hero-layout">
+                    <div class="hero-copy">
+                        <p class="eyebrow"><span aria-hidden="true"></span> Экспериментальный порт</p>
+                        <h1 id="hero-title">
+                            <span class="game-title">Jurassic Park:<br>The Game</span>
+                            <span class="episode-title">Episode 1 · Android</span>
+                        </h1>
+                        <p class="hero-description">Вернитесь на остров Нублар. Первый эпизод приключения Telltale теперь можно собрать для запуска на ARM64-устройстве с Android.</p>
+                        <div class="hero-actions">
+                            <a class="button button-primary" href="https://github.com/walmstudio/jp100android/releases/download/v1.0/jurassic-park-android.apk" download>
+                                <svg aria-hidden="true" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12m-5-5 5 5 5-5M5 21h14"/></svg>
+                                Скачать APK
+                            </a>
+                            <a class="button button-secondary" href="https://codeload.github.com/walmstudio/jp100android/zip/refs/heads/source-code" download>Исходники</a>
+                            <a class="button button-secondary" href="#installation">Как установить <span aria-hidden="true">↓</span></a>
+                        </div>
+                        <p class="download-note">APK v1.0 · Android 10+ · ARM64</p>
+                    </div>
+
+                    <aside class="requirements" aria-labelledby="requirements-title">
+                        <p class="requirements-label">Перед началом</p>
+                        <h2 id="requirements-title">Что понадобится</h2>
+                        <ul>
+                            <li><span>01</span><div><strong>Android 10+</strong><small>Устройство с процессором ARM64</small></div></li>
+                            <li><span>02</span><div><strong>Linux x86-64</strong><small>Компьютер для сборки APK</small></div></li>
+                            <li><span>03</span><div><strong>Оригинальная игра</strong><small>Легальная ПК-версия Episode 1</small></div></li>
+                        </ul>
+                    </aside>
+                </div>
+            </div>
+        </section>
+
+        <section class="installation container" id="installation" aria-labelledby="installation-title">
+            <div class="section-heading">
+                <div>
+                    <p class="section-kicker">Быстрый старт</p>
+                    <h2 id="installation-title">От исходников до запуска</h2>
+                </div>
+                <p>Сборка выполняется на ПК с Linux. JDK 17, Android SDK, NDK r27c и glslang можно установить автоматически флагом <code>--setup</code>.</p>
+            </div>
+
+            <ol class="steps">
+                <li class="step">
+                    <span class="step-number" aria-hidden="true">01</span>
+                    <div class="step-content">
+                        <h3>Подготовьте файлы игры</h3>
+                        <p>Установите ПК-версию первого эпизода. Папка игры должна содержать исполняемый файл, библиотеки и архивы с данными:</p>
+                        <ul class="file-list" aria-label="Необходимые файлы">
+                            <li><code>JurassicPark100.exe</code></li>
+                            <li><code>fmodex.dll</code></li>
+                            <li><code>binkw32.dll</code></li>
+                            <li><code>*.ttarch / *.ttarch2</code></li>
+                        </ul>
+                        <p class="step-note">В примерах игра находится в <code>$HOME/JPTelltale</code>. Если путь другой, замените его в командах.</p>
+                    </div>
+                </li>
+
+                <li class="step">
+                    <span class="step-number" aria-hidden="true">02</span>
+                    <div class="step-content">
+                        <h3>Распакуйте исходники и соберите APK</h3>
+                        <p>Скачайте архив по кнопке «Исходники», распакуйте его и откройте терминал в полученной папке. При первой сборке добавьте <code>--setup</code>, чтобы загрузить необходимые инструменты:</p>
+                        <div class="command-block">
+                            <div class="command-header"><span>Терминал Linux</span><button class="copy-button" type="button" data-copy="build-command">Копировать</button></div>
+                            <pre><code id="build-command">./build-android.sh --setup --game "$HOME/JPTelltale"</code></pre>
+                        </div>
+                        <p class="step-note">Потребуется несколько гигабайт свободного места. Готовый пакет появится в <code>android_jp/out/JP100-port.apk</code>.</p>
+                    </div>
+                </li>
+
+                <li class="step">
+                    <span class="step-number" aria-hidden="true">03</span>
+                    <div class="step-content">
+                        <h3>Установите порт на устройство</h3>
+                        <p>Включите на Android-устройстве отладку по USB и подключите его к компьютеру. Сборка и установка выполняются одной командой:</p>
+                        <div class="command-block">
+                            <div class="command-header"><span>Терминал Linux</span><button class="copy-button" type="button" data-copy="install-command">Копировать</button></div>
+                            <pre><code id="install-command">./build-android.sh --game "$HOME/JPTelltale" --install</code></pre>
+                        </div>
+                        <details class="inline-details">
+                            <summary>Установить уже собранный APK</summary>
+                            <div class="command-block compact">
+                                <div class="command-header"><span>Через ADB</span><button class="copy-button" type="button" data-copy="adb-command">Копировать</button></div>
+                                <pre><code id="adb-command">adb install -r android_jp/out/JP100-port.apk</code></pre>
+                            </div>
+                        </details>
+                    </div>
+                </li>
+
+                <li class="step">
+                    <span class="step-number" aria-hidden="true">04</span>
+                    <div class="step-content">
+                        <h3>Перенесите игру и начните играть</h3>
+                        <p>Скопируйте всю папку установленной ПК-игры в корень внутреннего хранилища устройства:</p>
+                        <div class="command-block path-block">
+                            <div class="command-header"><span>Путь на Android</span><button class="copy-button" type="button" data-copy="game-path">Копировать</button></div>
+                            <pre><code id="game-path">/sdcard/JPTelltale</code></pre>
+                        </div>
+                        <ol class="launch-list">
+                            <li>Откройте <strong>Jurassic Park Port</strong> и разрешите доступ к хранилищу. На Android 11+ может понадобиться разрешение «Доступ ко всем файлам».</li>
+                            <li>Нажмите <strong>«Проверить»</strong>, затем <strong>«Играть»</strong>.</li>
+                        </ol>
+                        <div class="important-note"><strong>Важно:</strong> <code>JurassicPark100.exe</code> на устройстве должен совпадать с файлом, использованным при сборке.</div>
+                    </div>
+                </li>
+            </ol>
+        </section>
+
+        <section class="support container" aria-labelledby="support-title">
+            <div class="section-heading compact-heading">
+                <div>
+                    <p class="section-kicker">Если что-то пошло не так</p>
+                    <h2 id="support-title">Проверка и диагностика</h2>
+                </div>
+            </div>
+            <div class="support-grid">
+                <details class="support-card">
+                    <summary>Игра не запускается <span aria-hidden="true">+</span></summary>
+                    <div class="support-content">
+                        <p>Проверьте целостность <code>JurassicPark100.exe</code>, наличие архивов данных и разрешение на доступ к хранилищу. Для первого запуска выберите системный <strong>OpenGL ES</strong> вместо Vulkan или Zink.</p>
+                    </div>
+                </details>
+                <details class="support-card">
+                    <summary>Где найти журнал <span aria-hidden="true">+</span></summary>
+                    <div class="support-content">
+                        <p>Откройте <strong>«Лог»</strong> в лаунчере или файл <code>/sdcard/JPTelltale/Documents/jp100_run.log</code>. Там же по умолчанию хранятся сохранения.</p>
+                    </div>
+                </details>
+            </div>
+            <p class="source-link">Дополнительные параметры сборки и сведения о совместимости — в <a href="https://github.com/walmstudio/jp100android/tree/source-code" target="_blank" rel="noopener noreferrer">документации проекта на GitHub</a>.</p>
+        </section>
+    </main>
+
+    <footer class="site-footer">
+        <div class="container footer-inner">
+            <p>Неофициальный порт. Файлы игры в архив не входят.<br><span>Jurassic Park и связанные материалы принадлежат их правообладателям.</span></p>
+            <a class="walm-button" href="https://walmstudio.github.io/site" target="_blank" rel="noopener noreferrer" aria-label="WALM Studio">
+                <img src="images/walm.png" width="40" height="40" alt="">
+                <span>by WALM</span>
+            </a>
+        </div>
+    </footer>
+
+    <script src="js/main.js"></script>
+</body>
+</html>
