@@ -1,0 +1,500 @@
+package com.me1port.launcher;
+
+import android.app.Activity;
+import android.content.Intent;
+import android.os.Build;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.os.SystemClock;
+import android.graphics.Color;
+import android.graphics.BitmapFactory;
+import android.os.VibrationEffect;
+import android.os.Vibrator;
+import android.view.Gravity;
+import android.view.InputDevice;
+import android.view.InputEvent;
+import android.view.KeyEvent;
+import android.view.MotionEvent;
+import android.view.Surface;
+import android.view.SurfaceHolder;
+import android.view.PointerIcon;
+import android.view.SurfaceView;
+import android.view.View;
+import android.view.Window;
+import android.view.WindowManager;
+import android.widget.FrameLayout;
+import android.widget.ImageView;
+import android.widget.TextView;
+import android.widget.Toast;
+import java.util.Locale;
+
+/** The game itself (process ":game"): libme1game.so runs MassEffect.exe on its own threads, the GLES backend presents
+ * frames into this SurfaceView. Touch = mouse (one finger: left button, second finger: right button), Back = Escape,
+ * a hardware keyboard works as the PC keyboard; ControlsOverlay adds on-screen controls (stick, keys, look area). The process ends when the game exits.
+ * v0.9.6: a start-up screen (until the first frame: elapsed time, D3D shaders created, HLSL compiles / cache hits,
+ * GL programs) and afterwards a small "compiling shaders" badge while the game compiles or links shaders.
+ * v0.9.7: loading picture behind the start-up screen; gamepads (Pad): physical controllers and the on-screen Xbox pad
+ * feed the game's XInput pad 0 (profile "xinput", needs a controller mod) or emulate keyboard + mouse (profile "kbm");
+ * rumble (XInputSetState) is played on the controller's vibrator or on the phone.
+ * v1.1.3: the phone keyboard (⌨ key of the "skyrim" controls layout): KbdSink takes the IME's text - characters a PC
+ * keyboard has are sent as key presses (like a hardware keyboard), others as WM_CHAR (nativeChar); Backspace / Enter as keys. */
+public class GameActivity extends Activity implements SurfaceHolder.Callback {
+    static { System.loadLibrary("me1game"); }
+    static native int nativeStart(String[] args, String[] env, String log);
+    static native void nativeSurface(Surface s);
+    static native void nativeTouch(int action, float x, float y);
+    static native void nativeKey(int code, int down, int unicode);
+    static native void nativeMouseRel(float dx, float dy);
+    static native void nativeMouseButton(int button, int down);
+    static native long nativeCursor();   /* v1.1.5: CursorView */
+    /** XInput pad 0: XINPUT_GAMEPAD buttons, triggers 0..255, sticks -32768..32767 (Y up = positive) */
+    static native void nativePad(int buttons, int lt, int rt, int lx, int ly, int rx, int ry);
+    static native void nativePadConnect(int on);
+    /** (left motor << 16) | right motor, 0..65535 each (last XInputSetState) */
+    static native int nativePadVibration();
+    /** v1.1.3: a typed character without a PC key (IME text, e.g. Cyrillic) -> WM_CHAR */
+    static native void nativeChar(int ch);
+    static final Pad pad = new Pad();
+    /** see me1_status() in hle_d3d9_gl.h */
+    static native long[] nativeStatus();
+    /** {fps*10, frame ms*10, renderer 0 none/1 GLES/2 zink/3 Vulkan, fps limit}: see me1_perf() in hle_d3d9.c */
+    static native long[] nativePerf();
+    static native String nativeGearmass();   /* v1.2.1 GEARMASS indicator line */
+    private static final String[] RENDERERS = { "нет вывода", "GLES", "GLES (zink)", "Vulkan" };
+    private ControlsOverlay overlay;
+    private CursorView cursor;          /* v1.1.5 */
+    private TextView status, badge, fps;
+    private ImageView splash;
+    private boolean rumble, rumblePhone, vibrating;
+    private Vibrator phoneVib;
+    private final Handler ui = new Handler(Looper.getMainLooper());
+    private long t0;
+    private android.content.SharedPreferences cprefs;
+    private boolean polling;
+    private static GameActivity current;
+    /** jp: started by the JP100 launcher (intent extra "jp100"). jpDirect: jp and not the "xinput" profile - a finger on the screen is the mouse itself. */
+    static boolean jp, jpDirect;
+    private SurfaceView gameView;
+    private KbdSink kbd;
+    private boolean kbdOn, imeSeen;
+
+    @Override protected void onCreate(Bundle b) {
+        super.onCreate(b);
+        L.init(this);
+        requestWindowFeature(Window.FEATURE_NO_TITLE);
+        Window w = getWindow();
+        w.addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN | WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        if (Build.VERSION.SDK_INT >= 28) {
+            WindowManager.LayoutParams lp = w.getAttributes();
+            lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+            w.setAttributes(lp);
+        }
+        jp = getIntent().getBooleanExtra("jp100", false);
+        jpDirect = jp;
+        SurfaceView sv = new SurfaceView(this);
+        sv.getHolder().addCallback(this);
+        sv.setFocusable(true); sv.setFocusableInTouchMode(true);
+        // Hide Android's pointer over the game surface and overlay layers.
+        sv.setPointerIcon(PointerIcon.getSystemIcon(this, PointerIcon.TYPE_NULL));
+        gameView = sv;
+        /* pan, not resize: the game surface keeps its size; the keyboard target sits in the top-left corner, so nothing moves */
+        w.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_PAN | WindowManager.LayoutParams.SOFT_INPUT_STATE_HIDDEN);
+        FrameLayout root = new FrameLayout(this);
+        root.addView(sv);
+        kbd = new KbdSink(this);   /* 1x1, invisible: target of the phone keyboard */
+        root.addView(kbd, new FrameLayout.LayoutParams(1, 1));
+        w.getDecorView().getViewTreeObserver().addOnGlobalLayoutListener(this::checkIme);
+        splash = new ImageView(this);   /* loading picture until the first frame (assets/loading.jpg) */
+        try (java.io.InputStream in = getAssets().open("loading.jpg")) {
+            splash.setImageBitmap(BitmapFactory.decodeStream(in)); splash.setScaleType(ImageView.ScaleType.CENTER_CROP);
+            splash.setBackgroundColor(Color.BLACK);
+            root.addView(splash, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
+        } catch (Exception e) { splash = null; }
+        overlay = new ControlsOverlay(this, this::mouseTouch);   /* on-screen controls (toggle in the top-left corner) */
+        root.addView(overlay);
+        cursor = new CursorView(this, ControlsSettings.prefs(this));   /* v1.1.5: the game's mouse cursor (menus) */
+        root.addView(cursor);
+        float dp = getResources().getDisplayMetrics().density;
+        status = new TextView(this);   /* not clickable: touches go through to the controls */
+        status.setTextColor(Color.rgb(0xE0, 0xE6, 0xEE)); status.setTextSize(15); status.setGravity(Gravity.CENTER);
+        status.setBackgroundColor(0xD0101418); status.setPadding((int) (24 * dp), (int) (16 * dp), (int) (24 * dp), (int) (16 * dp));
+        status.setText(L.t("Jurassic Park запускается…"));
+        FrameLayout.LayoutParams sl = new FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT,
+                splash != null ? Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL : Gravity.CENTER);
+        if (splash != null) { sl.bottomMargin = (int) (12 * dp); status.setBackgroundColor(0xB0101418); status.setTextSize(13); }
+        root.addView(status, sl);
+        badge = new TextView(this);
+        badge.setTextColor(0xE0FFD080); badge.setTextSize(12); badge.setBackgroundColor(0x90101418);
+        badge.setPadding((int) (10 * dp), (int) (4 * dp), (int) (10 * dp), (int) (4 * dp)); badge.setVisibility(View.GONE);
+        FrameLayout.LayoutParams bl = new FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+        bl.topMargin = (int) (6 * dp);
+        root.addView(badge, bl);
+        String[] env = getIntent().getStringArrayExtra("env");
+        boolean showFps = false;
+        if (env != null) for (String v : env) if ("ME1_SHOW_FPS=1".equals(v) || "ME1_GM_HUD=1".equals(v)) showFps = true;
+        if (showFps) {   /* [Port] ShowFps / ME1_SHOW_FPS=1: counter in the top-right corner (the controls toggle is top-left) */
+            fps = new TextView(this);
+            fps.setTextColor(0xF0A0FF90); fps.setTextSize(12); fps.setBackgroundColor(0x80000000); fps.setTypeface(android.graphics.Typeface.MONOSPACE);
+            fps.setPadding((int) (8 * dp), (int) (3 * dp), (int) (8 * dp), (int) (3 * dp)); fps.setVisibility(View.GONE);
+            FrameLayout.LayoutParams fl = new FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT,
+                    Gravity.TOP | Gravity.END);
+            fl.topMargin = (int) (6 * dp); fl.rightMargin = (int) (6 * dp);
+            root.addView(fps, fl);
+        }
+        setContentView(root);
+        root.setPointerIcon(PointerIcon.getSystemIcon(this, PointerIcon.TYPE_NULL));
+        t0 = SystemClock.uptimeMillis();
+        cprefs = ControlsSettings.prefs(this);
+        readPadSettings();
+        phoneVib = (Vibrator) getSystemService(VIBRATOR_SERVICE);
+        sv.requestFocus();
+        hideBars();
+        current = this;
+        Intent it = getIntent();
+        nativeStart(it.getStringArrayExtra("args"), it.getStringArrayExtra("env"), it.getStringExtra("log"));
+    }
+    private void hideBars() {
+        getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                | View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_LAYOUT_STABLE | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN);
+    }
+    @Override public void onWindowFocusChanged(boolean has) { super.onWindowFocusChanged(has); if (has) hideBars(); else cancelMouseTouch(); }
+    @Override public void surfaceCreated(SurfaceHolder h) { nativeSurface(h.getSurface()); }
+    @Override public void surfaceChanged(SurfaceHolder h, int format, int width, int height) { }
+    @Override public void surfaceDestroyed(SurfaceHolder h) { cancelMouseTouch(); nativeSurface(null); }
+
+    @Override protected void onPause() {
+        super.onPause(); cancelMouseTouch(); if (overlay != null) overlay.releaseAll(); pad.releaseAll(); stopRumble();
+        if (cursor != null) cursor.stop();
+        polling = false; ui.removeCallbacks(poll); ui.removeCallbacks(rumblePoll);
+    }
+    /** v1.2: import / export of custom-layout profiles (CtlProfile, system file picker) */
+    @Override protected void onActivityResult(int req, int res, Intent data) {
+        if (CtlProfile.onResult(this, req, res, data)) return;
+        super.onActivityResult(req, res, data);
+    }
+    @Override protected void onResume() {
+        super.onResume(); readPadSettings();
+        if (cursor != null) cursor.start();
+        if (!polling) { polling = true; ui.postDelayed(poll, 300); ui.postDelayed(rumblePoll, 500); }
+    }
+    /** profile + camera speed for the pad; called on start/resume and when the controls settings change */
+    void readPadSettings() {
+        if (cprefs == null) return;
+        pad.xinput = cprefs.getBoolean("xinput", false);
+        pad.lookScale = Math.max(2, Math.min(40, cprefs.getInt("look", 12))) / 10f;
+        pad.invertY = cprefs.getBoolean("invertY", false);
+        pad.nintendo = cprefs.getBoolean("nintendo", false);
+        rumble = cprefs.getBoolean("rumble", true); rumblePhone = cprefs.getBoolean("rumblePhone", true);
+    }
+
+    /* ---- phone keyboard (v1.1.3) ---- */
+    void toggleKeyboard() {
+        android.view.inputmethod.InputMethodManager im = (android.view.inputmethod.InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+        if (im == null || kbd == null) return;
+        if (kbdOn) {
+            im.hideSoftInputFromWindow(kbd.getWindowToken(), 0); kbdOn = false; kbd.comp = ""; gameView.requestFocus();
+        } else {
+            kbd.comp = ""; kbd.requestFocus(); im.restartInput(kbd);
+            im.showSoftInput(kbd, android.view.inputmethod.InputMethodManager.SHOW_FORCED); kbdOn = true; imeSeen = false;
+            ui.postDelayed(() -> { if (kbdOn && !imeSeen) im.showSoftInput(kbd, android.view.inputmethod.InputMethodManager.SHOW_FORCED); }, 250);
+        }
+        if (overlay != null) overlay.invalidate();
+        hideBars();
+    }
+    boolean keyboardShown() { return kbdOn; }
+    /** the keyboard was closed with Back or its own button: forget it (called on layout changes and every 300 ms) */
+    private void checkIme() {
+        if (!kbdOn) return;
+        boolean ime = imeVisible();
+        if (ime) imeSeen = true;
+        else if (imeSeen) { imeSeen = false; kbdOn = false; kbd.comp = ""; gameView.requestFocus(); if (overlay != null) overlay.invalidate(); hideBars(); }
+    }
+    private boolean imeVisible() {
+        View decor = getWindow().getDecorView();
+        if (Build.VERSION.SDK_INT >= 30) try {   /* WindowInsets.isVisible(Type.ime()) - API 30, the APK is built against 29 */
+            android.view.WindowInsets in = decor.getRootWindowInsets();
+            if (in != null) {
+                int t = (Integer) Class.forName("android.view.WindowInsets$Type").getMethod("ime").invoke(null);
+                return (Boolean) android.view.WindowInsets.class.getMethod("isVisible", int.class).invoke(in, t);
+            }
+        } catch (Throwable ignored) { }
+        android.graphics.Rect r = new android.graphics.Rect(); decor.getWindowVisibleDisplayFrame(r);
+        int h = decor.getHeight();
+        return h > 0 && h - r.bottom > h * 0.15f;
+    }
+    /** IME target: text -> the game. comp = the composing text already typed into the game (replaced by backspaces) */
+    static final class KbdSink extends View {
+        String comp = "";
+        KbdSink(android.content.Context c) { super(c); setFocusable(true); setFocusableInTouchMode(true); }
+        @Override public boolean onCheckIsTextEditor() { return true; }
+        @Override public android.view.inputmethod.InputConnection onCreateInputConnection(android.view.inputmethod.EditorInfo o) {
+            o.inputType = android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+                    | android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;
+            o.imeOptions = android.view.inputmethod.EditorInfo.IME_FLAG_NO_EXTRACT_UI | android.view.inputmethod.EditorInfo.IME_FLAG_NO_FULLSCREEN
+                    | android.view.inputmethod.EditorInfo.IME_ACTION_DONE;
+            return new android.view.inputmethod.BaseInputConnection(this, false) {
+                @Override public boolean commitText(CharSequence t, int pos) { replace(t.toString()); comp = ""; return true; }
+                @Override public boolean setComposingText(CharSequence t, int pos) { replace(t.toString()); return true; }
+                @Override public boolean finishComposingText() { comp = ""; return true; }
+                @Override public boolean deleteSurroundingText(int before, int after) {
+                    for (int i = 0; i < Math.max(1, before); i++) key(KeyEvent.KEYCODE_DEL);
+                    return true;
+                }
+                @Override public boolean sendKeyEvent(KeyEvent e) {
+                    if (e.getAction() == KeyEvent.ACTION_DOWN) nativeKey(e.getKeyCode(), 1, e.getUnicodeChar());
+                    else if (e.getAction() == KeyEvent.ACTION_UP) nativeKey(e.getKeyCode(), 0, 0);
+                    return true;
+                }
+                @Override public boolean performEditorAction(int action) { key(KeyEvent.KEYCODE_ENTER); return true; }
+            };
+        }
+        /** the game holds comp: turn it into t (backspace over the differing tail, type the rest) */
+        void replace(String t) {
+            int k = 0;
+            while (k < comp.length() && k < t.length() && comp.charAt(k) == t.charAt(k)) k++;
+            for (int i = comp.length(); i > k; i--) key(KeyEvent.KEYCODE_DEL);
+            type(t.substring(k)); comp = t;
+        }
+        private static final android.view.KeyCharacterMap KCM = android.view.KeyCharacterMap.load(android.view.KeyCharacterMap.VIRTUAL_KEYBOARD);
+        static void type(String t) {
+            for (int i = 0; i < t.length(); i++) {
+                char ch = t.charAt(i);
+                if (ch == '\n') { key(KeyEvent.KEYCODE_ENTER); continue; }
+                KeyEvent[] ev = ch < 128 ? KCM.getEvents(new char[] { ch }) : null;
+                if (ev != null && ev.length > 0) {
+                    for (KeyEvent e : ev) nativeKey(e.getKeyCode(), e.getAction() == KeyEvent.ACTION_DOWN ? 1 : 0,
+                            e.getAction() == KeyEvent.ACTION_DOWN ? e.getUnicodeChar(e.getMetaState()) : 0);
+                } else if (!Character.isSurrogate(ch)) nativeChar(ch);
+            }
+        }
+        static void key(int code) { nativeKey(code, 1, 0); nativeKey(code, 0, 0); }
+    }
+
+    /* ---- physical gamepads ---- */
+    private static boolean isPad(InputEvent e) {
+        int s = e.getSource();
+        return (s & InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD || (s & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK;
+    }
+    private static float axis(MotionEvent e, int a) { return e.getAxisValue(a); }
+    @Override public boolean onGenericMotionEvent(MotionEvent e) {
+        int source = e.getSource();
+        int action = e.getActionMasked();
+        if ((source & InputDevice.SOURCE_MOUSE) == InputDevice.SOURCE_MOUSE) {
+            if (action == MotionEvent.ACTION_HOVER_MOVE || action == MotionEvent.ACTION_MOVE) {
+                nativeTouch(2, e.getX(), e.getY());
+                syncMouseButtons(e.getButtonState());
+                return true;
+            }
+            if (action == MotionEvent.ACTION_SCROLL) {
+                float wheel = e.getAxisValue(MotionEvent.AXIS_VSCROLL);
+                if (wheel != 0) nativeMouseButton(wheel > 0 ? 3 : 4, 1);
+                return true;
+            }
+        }
+        if ((source & InputDevice.SOURCE_JOYSTICK) != InputDevice.SOURCE_JOYSTICK || action != MotionEvent.ACTION_MOVE)
+            return super.onGenericMotionEvent(e);
+        InputDevice d = e.getDevice();
+        /* right stick: Z/RZ on most pads; RX/RY when Z/RZ are triggers (range 0..1) */
+        boolean zTrig = false;
+        if (d != null) { InputDevice.MotionRange z = d.getMotionRange(MotionEvent.AXIS_Z, e.getSource()); zTrig = z != null && z.getMin() >= 0 && d.getMotionRange(MotionEvent.AXIS_RX, e.getSource()) != null; }
+        float rx = zTrig ? axis(e, MotionEvent.AXIS_RX) : axis(e, MotionEvent.AXIS_Z), ry = zTrig ? axis(e, MotionEvent.AXIS_RY) : axis(e, MotionEvent.AXIS_RZ);
+        float lt = Math.max(axis(e, MotionEvent.AXIS_LTRIGGER), axis(e, MotionEvent.AXIS_BRAKE)), rt = Math.max(axis(e, MotionEvent.AXIS_RTRIGGER), axis(e, MotionEvent.AXIS_GAS));
+        if (zTrig) { lt = Math.max(lt, axis(e, MotionEvent.AXIS_Z)); rt = Math.max(rt, axis(e, MotionEvent.AXIS_RZ)); }
+        pad.lastDevice = e.getDeviceId(); pad.lastInput = SystemClock.uptimeMillis();
+        pad.physAxes(axis(e, MotionEvent.AXIS_X), axis(e, MotionEvent.AXIS_Y), rx, ry, lt, rt, axis(e, MotionEvent.AXIS_HAT_X), axis(e, MotionEvent.AXIS_HAT_Y));
+        return true;
+    }
+    @Override public boolean dispatchGenericMotionEvent(MotionEvent e) {
+        if ((e.getSource() & InputDevice.SOURCE_MOUSE) == InputDevice.SOURCE_MOUSE) {
+            int a = e.getActionMasked();
+            if (a == MotionEvent.ACTION_BUTTON_PRESS || a == MotionEvent.ACTION_BUTTON_RELEASE) {
+                boolean down = a == MotionEvent.ACTION_BUTTON_PRESS;
+                int b = e.getActionButton();
+                int button = b == MotionEvent.BUTTON_PRIMARY ? 0 : b == MotionEvent.BUTTON_SECONDARY ? 1 : b == MotionEvent.BUTTON_TERTIARY ? 2 : -1;
+                if (button >= 0) { nativeTouch(2, e.getX(), e.getY()); syncMouseButtons(e.getButtonState()); return true; }
+            }
+        }
+        return super.dispatchGenericMotionEvent(e);
+    }
+    private boolean padKey(int code, KeyEvent e, boolean down) {
+        boolean dpad = code == KeyEvent.KEYCODE_DPAD_UP || code == KeyEvent.KEYCODE_DPAD_DOWN || code == KeyEvent.KEYCODE_DPAD_LEFT || code == KeyEvent.KEYCODE_DPAD_RIGHT;
+        if (!KeyEvent.isGamepadButton(code) && !(dpad && isPad(e))) return false;
+        if (down && e.getRepeatCount() > 0) return true;
+        pad.lastDevice = e.getDeviceId(); pad.lastInput = SystemClock.uptimeMillis();
+        return pad.physKey(code, down);
+    }
+    /* ---- rumble: XInputSetState -> controller vibrator, else the phone ---- */
+    private final Runnable rumblePoll = new Runnable() {
+        @Override public void run() {
+            if (!polling) return;
+            int v = 0;
+            if (rumble && pad.xinput) try { v = nativePadVibration(); } catch (Throwable ignored) { }
+            int amp = Math.max(v >>> 16, v & 0xFFFF) >> 8;
+            if (amp > 8) vibrate(Math.min(255, amp)); else stopRumble();
+            ui.postDelayed(this, 100);
+        }
+    };
+    private Vibrator target() {
+        InputDevice d = pad.lastDevice >= 0 ? InputDevice.getDevice(pad.lastDevice) : null;
+        if (d != null) { Vibrator v = d.getVibrator(); if (v != null && v.hasVibrator()) return v; }
+        return rumblePhone && phoneVib != null && phoneVib.hasVibrator() ? phoneVib : null;
+    }
+    private void vibrate(int amp) {
+        Vibrator v = target(); if (v == null) return;
+        try { v.vibrate(VibrationEffect.createOneShot(150, v.hasAmplitudeControl() ? amp : VibrationEffect.DEFAULT_AMPLITUDE)); vibrating = true; }
+        catch (Exception ignored) { }
+    }
+    private void stopRumble() {
+        if (!vibrating) return;
+        vibrating = false;
+        Vibrator v = target(); if (v != null) try { v.cancel(); } catch (Exception ignored) { }
+    }
+
+    /* start-up / shader compilation screen */
+    private final Runnable poll = new Runnable() {
+        @Override public void run() {
+            if (!polling) return;
+            long[] s = null;
+            try { s = nativeStatus(); } catch (Throwable ignored) { }
+            if (s != null && s.length >= 10) showStatus(s);
+            checkIme();
+            if (fps != null && s != null && s[0] != 0) {
+                long[] p = null;
+                try { p = nativePerf(); } catch (Throwable ignored) { }
+                if (p != null && p.length >= 4 && (p[0] > 0 || p[1] > 0)) {
+                    String r = p[2] >= 0 && p[2] < RENDERERS.length ? L.t(RENDERERS[(int) p[2]]) : "?";
+                    String t = String.format(Locale.ROOT, L.t("%.1f FPS · %.1f мс · %s"), p[0] / 10.0, p[1] / 10.0, r);
+                    if (p[3] > 0) t += L.t(" · лимит ") + p[3];
+                    String g = null;
+                    try { g = nativeGearmass(); } catch (Throwable ignored) { }
+                    if (g != null && g.length() > 0) t += "\n" + g;   /* GEARMASS: mode:level | bottleneck | CPU | GPU | heat */
+                    fps.setText(t); fps.setVisibility(View.VISIBLE);
+                }
+            }
+            ui.postDelayed(this, 300);
+        }
+    };
+    private void showStatus(long[] s) {
+        boolean compiling = s[3] != 0;
+        if (s[0] != 0 && splash != null) { splash.setVisibility(View.GONE); splash.setImageDrawable(null); splash = null; }
+        if (s[0] == 0) {   /* no frame yet */
+            long el = (SystemClock.uptimeMillis() - t0) / 1000;
+            StringBuilder b = new StringBuilder();
+            b.append(L.t("Jurassic Park запускается… ")).append(el / 60).append(':').append(String.format(Locale.ROOT, "%02d", el % 60)).append("\n\n");
+            b.append(L.t("Шейдеры D3D создано: ")).append(s[8]).append('\n');
+            b.append(L.t("Компиляция HLSL: ")).append(s[1] - s[2]).append(L.t(", из кэша: ")).append(s[2]);
+            if (compiling) b.append(String.format(Locale.ROOT, L.t("\nсейчас компилируется шейдер (%.1f с)"), s[4] / 1000.0));
+            b.append(L.t("\nПрограммы GPU: ")).append(s[5]).append(L.t(" (из кэша ")).append(s[6]).append(")\n\n");
+            b.append(compiling || s[1] > s[2]
+                    ? L.t("Идёт компиляция шейдеров. Первый запуск может занять\nнесколько минут; результат сохраняется в кэш.")
+                    : L.t("Загрузка данных игры…"));
+            status.setText(b); status.setVisibility(View.VISIBLE);
+            badge.setVisibility(View.GONE);
+            return;
+        }
+        status.setVisibility(View.GONE);
+        boolean show = cprefs.getBoolean("badge", true) && (compiling || (s[9] >= 0 && s[9] < 1500));
+        if (show) badge.setText(compiling ? String.format(Locale.ROOT, L.t("⚙ компиляция шейдера… %.1f с"), s[4] / 1000.0) : L.t("⚙ сборка шейдеров (GL: ") + s[5] + ")");
+        badge.setVisibility(show ? View.VISIBLE : View.GONE);
+    }
+    @Override public boolean onTouchEvent(MotionEvent e) { mouseTouch(e); return true; }
+    /* Track IDs, not array indices: Android reorders indices when a finger lifts. */
+    private int mouseTouchLeft = -1, mouseTouchRight = -1, mouseButtonState;
+    private float mouseTouchX, mouseTouchY;
+    private void syncMouseButtons(int state) {
+        final int[] masks = { MotionEvent.BUTTON_PRIMARY, MotionEvent.BUTTON_SECONDARY, MotionEvent.BUTTON_TERTIARY };
+        for (int i = 0; i < masks.length; i++)
+            if (((state ^ mouseButtonState) & masks[i]) != 0)
+                nativeMouseButton(i, (state & masks[i]) != 0 ? 1 : 0);
+        mouseButtonState = state;
+    }
+    private void cancelMouseTouch() {
+        nativeTouch(5, 0, 0);
+        mouseTouchLeft = mouseTouchRight = -1;
+        syncMouseButtons(0);
+    }
+    /** Absolute touch/mouse with held-button moves: hover -> LMB down -> drag -> up. */
+    void mouseTouch(MotionEvent e) {
+        int action = e.getActionMasked(), index = e.getActionIndex();
+        if ((e.getSource() & InputDevice.SOURCE_MOUSE) == InputDevice.SOURCE_MOUSE) {
+            nativeTouch(2, e.getX(), e.getY());
+            syncMouseButtons(action == MotionEvent.ACTION_CANCEL ? 0 : e.getButtonState());
+            return;
+        }
+        if (action == MotionEvent.ACTION_CANCEL) { cancelMouseTouch(); return; }
+        int id = e.getPointerId(index);
+        if (action == MotionEvent.ACTION_DOWN) {
+            cancelMouseTouch();
+            mouseTouchLeft = id;
+            mouseTouchX = e.getX(index); mouseTouchY = e.getY(index);
+            nativeTouch(0, mouseTouchX, mouseTouchY);
+        } else if (action == MotionEvent.ACTION_POINTER_DOWN) {
+            if (mouseTouchRight == -1) { mouseTouchRight = id; nativeTouch(3, mouseTouchX, mouseTouchY); }
+        } else if (action == MotionEvent.ACTION_MOVE) {
+            int i = e.findPointerIndex(mouseTouchLeft);
+            if (i >= 0) {
+                mouseTouchX = e.getX(i); mouseTouchY = e.getY(i);
+                nativeTouch(2, mouseTouchX, mouseTouchY);
+            }
+        } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_POINTER_UP) {
+            if (id == mouseTouchLeft) {
+                mouseTouchX = e.getX(index); mouseTouchY = e.getY(index);
+                nativeTouch(1, mouseTouchX, mouseTouchY); mouseTouchLeft = -1;
+            }
+            if (id == mouseTouchRight) { nativeTouch(4, mouseTouchX, mouseTouchY); mouseTouchRight = -1; }
+            if (action == MotionEvent.ACTION_UP) cancelMouseTouch();
+        }
+    }
+    private static boolean passThrough(int code) {
+        return code == KeyEvent.KEYCODE_VOLUME_UP || code == KeyEvent.KEYCODE_VOLUME_DOWN || code == KeyEvent.KEYCODE_VOLUME_MUTE
+                || code == KeyEvent.KEYCODE_POWER || code == KeyEvent.KEYCODE_HOME;
+    }
+    @Override public boolean onKeyDown(int code, KeyEvent e) {
+        if (passThrough(code)) return super.onKeyDown(code, e);
+        if (padKey(code, e, true)) return true;
+        if (e.getRepeatCount() == 0 || code != KeyEvent.KEYCODE_BACK) nativeKey(code, 1, e.getUnicodeChar());
+        return true;
+    }
+    @Override public boolean onKeyUp(int code, KeyEvent e) {
+        if (passThrough(code)) return super.onKeyUp(code, e);
+        if (padKey(code, e, false)) return true;
+        nativeKey(code, 0, 0);
+        return true;
+    }
+    @Override public void onBackPressed() { }   /* Back is Escape (handled in onKeyDown/onKeyUp) */
+
+    /** called from the game thread when MassEffect.exe returns (the process exits right after) */
+    static void onGameExit(int code) {
+        final GameActivity a = current;
+        if (a != null) a.runOnUiThread(a::finish);
+    }
+
+    /** v0.10.2: one-time events from the renderer (Vulkan VK_ERROR_DEVICE_LOST on malisx2) — a readable Toast */
+    static void onDeviceLost(String msg) {
+        final GameActivity a = current;
+        if (a == null || msg == null) return;
+        a.runOnUiThread(() -> Toast.makeText(a.getApplicationContext(), msg, Toast.LENGTH_LONG).show());
+    }
+
+    /** v0.10.10: the GPU driver dies serially — native exits with code 77; schedule a fresh process via AlarmManager
+     * (same intent: game folder, env, log). Shader caches are warm, so the relaunch is quick. */
+    static void onGameRestart() {
+        final GameActivity a = current;
+        if (a == null) return;
+        a.runOnUiThread(() -> {
+            try {
+                android.app.AlarmManager am = (android.app.AlarmManager) a.getSystemService(ALARM_SERVICE);
+                android.content.Intent again = new android.content.Intent(a.getIntent());   /* v0.10.13: compile fix (no cloneIntent / PendingIntent.FLAG_ACTIVITY_NEW_TASK) */
+                again.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+                android.app.PendingIntent pi = android.app.PendingIntent.getActivity(a, 9001, again,
+                    android.app.PendingIntent.FLAG_ONE_SHOT | android.app.PendingIntent.FLAG_IMMUTABLE);
+                if (am != null) am.setExact(android.app.AlarmManager.RTC, System.currentTimeMillis() + 1200, pi);
+                Toast.makeText(a.getApplicationContext(), L.t("Видеодрайвер умирает серийно — игра перезапускается (кэши шейдеров тёплые)"), Toast.LENGTH_LONG).show();
+            } catch (Throwable ignored) { }
+            a.finish();
+        });
+    }
+}
